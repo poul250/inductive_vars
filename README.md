@@ -7,8 +7,5 @@ The program receives a text file that contains exactly one function in the langu
 ## Installing
 
 ```
-git clone https://github.com/poul250/inductive_vars.git
-cd inductive_vars
-git submodule init
-git submodule update
+git clone --recursive https://github.com/poul250/inductive_vars.git
 ```
