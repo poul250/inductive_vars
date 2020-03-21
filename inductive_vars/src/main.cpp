@@ -22,6 +22,10 @@ using Edges = std::unordered_set<Edge, edge_hash>;
 struct Loop {
     Blk* head;
     std::unordered_set<Blk*> blocks;
+
+    bool operator==(const Loop& other) const noexcept {
+        return head == other.head && blocks == other.blocks;
+    }
 };
 
 Edges FindBackEdges(Blk *start) {
@@ -48,21 +52,21 @@ void ExtendWithLoopBlocks(std::unordered_set<Blk*>& blocks, Blk* cur_block) {
     }
 }
 
-std::unordered_set<Blk*> FindLoopBlocks(const Edge& back_edge) {
+Loop FindLoop(const Edge& back_edge) {
     const auto& [start_block, loop_head] = back_edge;
-    std::unordered_set<Blk*> blocks = {loop_head};
+    std::unordered_set<Blk*> loop_blocks = {loop_head};
 
-    ExtendWithLoopBlocks(blocks, start_block);
-    return blocks;
+    ExtendWithLoopBlocks(loop_blocks, start_block);
+    return {loop_head, std::move(loop_blocks)};
 }
 
-std::vector<std::unordered_set<Blk*>> FindLoops(Blk *start) {
-    std::vector<std::unordered_set<Blk*>> result;
+std::vector<Loop> FindLoops(Blk *start) {
+    std::vector<Loop> result;
     const auto& back_edges = FindBackEdges(start);
 
     for (const auto& back_edge : back_edges) {
-        auto&& blocks = FindLoopBlocks(back_edge);
-        result.emplace_back(std::move(blocks));
+        auto&& loop = FindLoop(back_edge);
+        result.emplace_back(std::move(loop));
     }
 
     return result;
@@ -72,7 +76,7 @@ static void readfn(Fn *fn) {
     printfn(fn, stdout);
     const auto& loops = FindLoops(fn->start);
     for (const auto& loop : loops) {
-        for (const auto& block : loop) {
+        for (const auto& block : loop.blocks) {
             std::cout << block->id << " ";
         }
         std::cout << std::endl;
