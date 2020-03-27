@@ -1,0 +1,20 @@
+{
+    "files.associations": {
+        "__debug": "cpp",
+        "exception": "cpp",
+        "functional": "cpp",
+        "memory": "cpp",
+        "new": "cpp",
+        "optional": "cpp",
+        "stdexcept": "cpp",
+        "typeinfo": "cpp",
+        "complex": "cpp",
+        "cstdio": "cpp",
+        "cwchar": "cpp",
+        "utility": "cpp",
+        "type_traits": "cpp",
+        "unordered_map": "cpp",
+        "unordered_set": "cpp",
+        "ops.h": "c"
+    }
+}

@@ -1,18 +1,24 @@
-# counts up from -1988 to 1991
+# simple looping program
+# sums all integers from 100 to 0
 
 export
 function $test() {
 @start
+	%s2 =w add 0, 1
 @loop
-	%n0  =l phi @start -1988, @loop %n1
-	%n1  =l add 1, %n0
-	%cmp =w cslel 1991, %n1
-	jnz %cmp, @end, @loop
+	%s  =w phi @start   0, @loop %s1
+	%n  =w phi @start 100, @loop %n1
+	%s1 =w add %s, %n
+	%n1 =w sub %n, 1
+	jnz %n1, @loop, @end
+
 @end
+	storew %s1, $a
 	ret
 }
 
 # >>> driver
 # extern void test(void);
-# int main() { test(); return 0; }
+# int a;
+# int main() { test(); return !(a == 5050); }
 # <<<

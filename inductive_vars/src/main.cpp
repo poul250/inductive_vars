@@ -22,9 +22,76 @@ using Edges = std::unordered_set<Edge, edge_hash>;
 struct Loop {
     Blk* head;
     std::unordered_set<Blk*> blocks;
+    std::unordered_set<uint> invariants;
+
+    template<typename THead, typename TBlocks>
+    Loop(THead&& _head, TBlocks&& _blocks)
+            : head(std::forward<THead>(_head))
+            , blocks(std::forward<TBlocks>(_blocks)) {
+    }
 
     bool operator==(const Loop& other) const noexcept {
         return head == other.head && blocks == other.blocks;
+    }
+
+    std::unordered_set<uint> GetDeclarations() {
+        std::unordered_set<uint> declarations;
+        for (auto block : blocks) {
+            for (auto phi = block->phi; phi; phi = phi->link) {
+                for (int i = 0; i < phi->narg; ++i) {
+                    if (blocks.find(phi->blk[i]) != blocks.cend()) {
+                        declarations.insert(phi->to.val);
+                    }
+                }
+            }
+            for (auto instr = block->ins; instr != block->ins + block->nins; ++instr) {
+                if (instr->to.type == RTmp) {
+                    declarations.insert(instr->to.val);
+                }
+            }
+        }
+        return declarations;
+    }
+
+    void FindInvariants(Tmp* tmp, int ntmp) {
+        const auto& declarations = GetDeclarations();
+        
+        auto declared_out = [&declarations](Ref ref) -> bool {
+            return declarations.find(ref.val) == declarations.cend();
+        };
+
+        bool updated = true;
+        while (updated) {
+            updated = false;
+            for (auto block : blocks) {
+                for (auto instr = block->ins; instr != block->ins + block->nins; ++instr) {
+                    if (instr->to.type == RTmp && !IsInvariant(instr->to)) {
+                        if (!IsInvariant(instr->arg[0]) && declared_out(instr->arg[0])) {
+                            invariants.insert(instr->arg[0].val);
+                            updated = true;
+                        }
+                        if (!IsInvariant(instr->arg[1]) && declared_out(instr->arg[1])) {
+                            invariants.insert(instr->arg[1].val);
+                            updated = true;
+                        }
+                        if (IsInvariant(instr->arg[0]) && IsInvariant(instr->arg[1])) {
+                            invariants.insert(instr->to.val);
+                            updated = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    bool IsInvariant(Ref ref) {
+        if (ref.type == RCon) {
+            return true;
+        }
+        if (invariants.find(ref.val) != invariants.cend()) {
+            return true;
+        }
+        return false;
     }
 };
 
@@ -69,15 +136,24 @@ std::vector<Loop> FindLoops(Blk *start) {
         result.emplace_back(std::move(loop));
     }
 
+    // TODO: do something with same loops
     return result;
 }
 
 static void readfn(Fn *fn) {
-    printfn(fn, stdout);
-    const auto& loops = FindLoops(fn->start);
+    // printfn(fn, stdout);
+    auto loops = FindLoops(fn->start);
+    for (auto& loop : loops) {
+        loop.FindInvariants(fn->tmp, fn->ntmp);
+    }
+
     for (const auto& loop : loops) {
         for (const auto& block : loop.blocks) {
             std::cout << block->id << " ";
+        }
+        std::cout << " | ";
+        for (const auto& inv : loop.invariants) {
+            std::cout << fn->tmp[inv].name << " ";
         }
         std::cout << std::endl;
     }
