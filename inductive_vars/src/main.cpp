@@ -110,12 +110,13 @@ Edges FindBackEdges(Blk *start) {
 }
 
 void ExtendWithLoopBlocks(std::unordered_set<Blk*>& blocks, Blk* cur_block) {
+    if (blocks.find(cur_block) != blocks.cend()) {
+        return;
+    }
+
     blocks.insert(cur_block);
-    const auto& pred_blocks = cur_block->pred;
     for (int i = 0; i < cur_block->npred; ++i) {
-        if (blocks.find(pred_blocks[i]) == blocks.cend()) {
-            ExtendWithLoopBlocks(blocks, pred_blocks[i]);
-        }
+        ExtendWithLoopBlocks(blocks, cur_block->pred[i]);
     }
 }
 
@@ -140,8 +141,20 @@ std::vector<Loop> FindLoops(Blk *start) {
     return result;
 }
 
+
+void lifehokku_dlya_samuraev(Fn* fn) {
+    // fill fields in blocks like idom
+    fillrpo(fn);
+    fillpreds(fn);
+    filluse(fn);
+    memopt(fn);
+    ssa(fn);
+}
+
+
 static void readfn(Fn *fn) {
-    // printfn(fn, stdout);
+    lifehokku_dlya_samuraev(fn);
+    printfn(fn, stdout);
     auto loops = FindLoops(fn->start);
     for (auto& loop : loops) {
         loop.FindInvariants(fn->tmp, fn->ntmp);
