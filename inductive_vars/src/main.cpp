@@ -1,7 +1,7 @@
 #include <algorithm>
 #include <vector>
 #include <unordered_set>
-#include <stack>
+#include <unordered_map>
 #include <iostream>
 
 #define export exports // for c++ compatibility
@@ -20,6 +20,13 @@ struct edge_hash {
 };
 using Edges = std::unordered_set<Edge, edge_hash>;
 
+// j = <i, a, b> - for inductive variable. j = i*a + b
+struct Val {
+  uint i;
+  Ref a;
+  Ref b;
+};
+
 struct Loop {
   Blk* head;
   std::unordered_set<Blk*> blocks;
@@ -35,22 +42,44 @@ struct Loop {
     return head == other.head && blocks == other.blocks;
   }
 
+  template<typename TFunc>
+  void ForEachInstruction(const TFunc& func) {
+    for (auto blk : blocks) {
+      for (auto instr = blk->ins; instr < blk->ins + blk->nins; ++instr) {
+        func(*blk, *instr);
+      }
+    }
+  }
+
+  template<typename TIns, typename TPhi>
+  void ForEachInstruction(const TIns& do_ins, const TPhi& do_phi) {
+    for (auto blk : blocks) {
+      for (auto phi = blk->phi; phi; phi = phi->link) {
+        do_phi(*blk, *phi);
+      }
+      for (auto instr = blk->ins; instr < blk->ins + blk->nins; ++instr) {
+        do_ins(*blk, *instr);
+      }
+    }
+  }
+
   std::unordered_set<uint> GetDeclarations() {
     std::unordered_set<uint> declarations;
-    for (auto block : blocks) {
-      for (auto phi = block->phi; phi; phi = phi->link) {
-        for (int i = 0; i < phi->narg; ++i) {
-          if (blocks.find(phi->blk[i]) != blocks.cend()) {
-            declarations.insert(phi->to.val);
+    ForEachInstruction(
+      [&declarations](const Blk& blk, const Ins& ins) {
+        if (ins.to.type == RTmp) {
+          declarations.insert(ins.to.val);
+        }
+      }, 
+      [this, &declarations](const Blk& blk, const Phi& phi) {
+        for (auto blk = phi.blk; blk < phi.blk + phi.narg; ++blk) {
+          if (this->blocks.find(*blk) != blocks.cend()) {
+            declarations.insert(phi.to.val);
+            break;
           }
         }
       }
-      for (auto instr = block->ins; instr != block->ins + block->nins; ++instr) {
-        if (instr->to.type == RTmp) {
-          declarations.insert(instr->to.val);
-        }
-      }
-    }
+    );
     return declarations;
   }
 
@@ -68,37 +97,37 @@ struct Loop {
     size_t last_invariants_size;
     do {
       last_invariants_size = invariant_vars.size();
-      for (auto block : blocks) {
-        for (auto phi = block->phi; phi; phi = phi->link) {
-          for (int i = 0; i < phi->narg; ++i) {
-            if (declared_out(phi->arg[i])) {
-              invariant_vars.insert(phi->arg[i].val);
+      
+      ForEachInstruction(
+        [this, &declared_out, &is_invariant](const Blk& blk, const Ins& ins) {
+          if (ins.to.type != RTmp) {
+            return;
+          }
+          for (auto ref = ins.arg; ref < ins.arg + 2; ++ref) {
+            if (declared_out(*ref)) {
+              invariant_vars.insert(ref->val);
+            }
+          }
+          if (std::all_of(ins.arg, ins.arg + 2, is_invariant)) {
+            invariant_vars.insert(ins.to.val);
+          }
+        }, 
+        [this, &declared_out, &is_invariant](const Blk& blk, const Phi& phi) {
+          for (int i = 0; i < phi.narg; ++i) {
+            if (declared_out(phi.arg[i])) {
+              invariant_vars.insert(phi.arg[i].val);
             }
           }
 
-          if (std::all_of(phi->arg, phi->arg + phi->narg, is_invariant)) {
-            invariant_vars.insert(phi->to.type);
+          if (std::all_of(phi.arg, phi.arg + phi.narg, is_invariant)) {
+            invariant_vars.insert(phi.to.type);
           }
         }
-
-        for (auto instr = block->ins; instr != block->ins + block->nins; ++instr) {
-          if (instr->to.type != RTmp) {
-            continue;
-          }
-          for (int i = 0; i < 2; ++i) {
-            if (declared_out(instr->arg[i])) {
-              invariant_vars.insert(instr->arg[i].val);
-            }
-          }
-          if (std::all_of(instr->arg, instr->arg + 2, is_invariant)) {
-            invariant_vars.insert(instr->to.val);
-          }
-        }
-      }
+      );
     } while (invariant_vars.size() != last_invariants_size);
   }
 
-  bool IsInvariant(Ref ref) {
+  bool IsInvariant(const Ref& ref) const {
     if (ref.type == RCon) {
       return true;
     }
@@ -106,6 +135,40 @@ struct Loop {
       return true;
     }
     return false;
+  }
+
+  static bool IsBinaryOp(const Ins& ins) {
+    return ins.to.type == RTmp;
+  }
+
+  std::unordered_set<uint> FindOriginalInductiveVars() {
+    std::unordered_set<uint> candidates;
+    std::unordered_set<uint> not_inductive;
+
+    ForEachInstruction(
+      [this, &candidates, &not_inductive](const Blk& blk, const Ins& ins) {
+        if (IsBinaryOp(ins)) {
+          const auto& cand = ins.to.val;
+          if ((ins.arg[0].val == cand && this->IsInvariant(ins.arg[1]) || 
+              ins.arg[1].val == cand && this->IsInvariant(ins.arg[0])) && 
+              not_inductive.find(cand) == not_inductive.cend()) {
+            candidates.insert(cand);
+          } else {
+            candidates.erase(cand);
+            not_inductive.insert(cand);
+          }
+        }
+      }
+    );
+
+    return candidates;
+  }
+
+  void FindInductiveVars() {
+    std::unordered_map<uint, uint> val_to_var;
+
+    auto original_inductive_vars = FindOriginalInductiveVars();
+
   }
 };
 
