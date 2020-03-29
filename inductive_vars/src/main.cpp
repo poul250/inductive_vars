@@ -21,10 +21,22 @@ struct edge_hash {
 };
 using Edges = std::unordered_set<Edge, edge_hash>;
 
+struct ref_hash {
+  inline std::size_t operator()(const Ref& ref) const {
+    std::size_t result = ref.val;
+    result |= ((ref.type) << 28);
+    return result;
+  }
+};
+
+bool operator==(const Ref& lhs, const Ref& rhs) noexcept {
+  return req(lhs, rhs);
+}
+
 struct Loop {
   Blk* head;
   std::unordered_set<Blk*> blocks;
-  std::unordered_set<uint> invariant_vars;
+  std::unordered_set<Ref, ref_hash> invariant_vars;
 
   template<typename THead, typename TBlocks>
   Loop(THead&& _head, TBlocks&& _blocks)
@@ -79,11 +91,11 @@ struct Loop {
           }
           for (auto ref = ins.arg; ref < ins.arg + 2; ++ref) {
             if (declared_out(*ref)) {
-              invariant_vars.insert(ref->val);
+              invariant_vars.insert(*ref);
             }
           }
           if (std::all_of(ins.arg, ins.arg + 2, is_invariant)) {
-            invariant_vars.insert(ins.to.val);
+            invariant_vars.insert(ins.to);
           }
         }
       );
@@ -94,7 +106,7 @@ struct Loop {
     if (ref.type == RCon) {
       return true;
     }
-    if (invariant_vars.find(ref.val) != invariant_vars.cend()) {
+    if (invariant_vars.find(ref) != invariant_vars.cend()) {
       return true;
     }
     return false;
@@ -104,16 +116,23 @@ struct Loop {
     return ins.to.type == RTmp;
   }
 
-  std::unordered_set<uint> FindOriginalInductiveVars() {
-    std::unordered_set<uint> candidates;
-    std::unordered_set<uint> not_inductive;
+  std::unordered_set<Ref, ref_hash> FindOriginalInductiveVars() {
+    std::unordered_set<Ref, ref_hash> candidates;
+    std::unordered_set<Ref, ref_hash> not_inductive;
+
+    auto is_add = [](const Ins& ins) {
+      return ins.op == Oadd;
+    };
+    auto is_sub = [](const Ins& ins) {
+      return ins.op == Osub;
+    };
 
     ForEachInstruction(
       [this, &candidates, &not_inductive](const Blk& blk, const Ins& ins) {
         if (IsBinaryOp(ins)) {
-          const auto& cand = ins.to.val;
-          if ((ins.arg[0].val == cand && this->IsInvariant(ins.arg[1]) || 
-              ins.arg[1].val == cand && this->IsInvariant(ins.arg[0])) && 
+          const auto& cand = ins.to;
+          if ((req(cand, ins.arg[0]) && this->IsInvariant(ins.arg[1]) || 
+              req(cand, ins.arg[1]) && this->IsInvariant(ins.arg[0])) &&
               not_inductive.find(cand) == not_inductive.cend()) {
             candidates.insert(cand);
           } else {
@@ -123,12 +142,11 @@ struct Loop {
         }
       }
     );
-
     return candidates;
   }
 
   void FindInductiveVars(Fn* fn) {
-    std::unordered_map<uint, std::tuple<uint, std::string, std::string>> val_to_var;
+    std::unordered_map<Ref, std::tuple<Ref, std::string, std::string>, ref_hash> val_to_var;
   
     const auto& original_inductive_vars = FindOriginalInductiveVars();
     for (const auto& original : original_inductive_vars) {
@@ -138,9 +156,8 @@ struct Loop {
 
     for (const auto& [var, val] : val_to_var) {
       const auto& [i, a, b] = val;
-      std::cout << fn->tmp[i].name << " " << a << " " << b << std::endl;
+      std::cout << fn->tmp[i.val].name << " " << a << " " << b << std::endl;
     }
-
   }
 };
 
@@ -216,7 +233,7 @@ static void readfn(Fn *fn) {
     }
     std::cout << " | ";
     for (const auto& inv : loop.invariant_vars) {
-      std::cout << fn->tmp[inv].name << " ";
+      std::cout << fn->tmp[inv.val].name << " ";
     }
     std::cout << std::endl;
   }
