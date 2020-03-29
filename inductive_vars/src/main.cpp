@@ -1,9 +1,10 @@
 #include <algorithm>
-#include <vector>
+#include <deque>
 #include <functional>
-#include <unordered_set>
-#include <unordered_map>
 #include <iostream>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #define export exports // for c++ compatibility
 extern "C" {
