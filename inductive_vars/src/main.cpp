@@ -112,32 +112,29 @@ struct Loop {
     return false;
   }
 
-  static constexpr bool IsBinaryOp(const Ins& ins) noexcept {
-    return ins.to.type == RTmp;
+  bool IsInductiveIns(const Ins& ins) {
+    if (ins.op == Oadd) {
+      return ((ins.to == ins.arg[0] && IsInvariant(ins.arg[1]) ||
+              ins.to == ins.arg[1] && IsInvariant(ins.arg[0])));
+    } else if (ins.op == Osub) {
+      return (ins.to == ins.arg[0] && IsInvariant(ins.arg[1]));
+    }
+    return false;
   }
 
   std::unordered_set<Ref, ref_hash> FindOriginalInductiveVars() {
     std::unordered_set<Ref, ref_hash> candidates;
     std::unordered_set<Ref, ref_hash> not_inductive;
 
-    auto is_add = [](const Ins& ins) {
-      return ins.op == Oadd;
-    };
-    auto is_sub = [](const Ins& ins) {
-      return ins.op == Osub;
-    };
-
     ForEachInstruction(
       [this, &candidates, &not_inductive](const Blk& blk, const Ins& ins) {
-        if (IsBinaryOp(ins)) {
-          const auto& cand = ins.to;
-          if ((req(cand, ins.arg[0]) && this->IsInvariant(ins.arg[1]) || 
-              req(cand, ins.arg[1]) && this->IsInvariant(ins.arg[0])) &&
-              not_inductive.find(cand) == not_inductive.cend()) {
-            candidates.insert(cand);
+        if (ins.to.type == RTmp) {
+          if (not_inductive.find(ins.to) == not_inductive.cend() && 
+              this->IsInductiveIns(ins)) {
+            candidates.insert(ins.to);
           } else {
-            candidates.erase(cand);
-            not_inductive.insert(cand);
+            candidates.erase(ins.to);
+            not_inductive.insert(ins.to);
           }
         }
       }
@@ -146,15 +143,15 @@ struct Loop {
   }
 
   void FindInductiveVars(Fn* fn) {
-    std::unordered_map<Ref, std::tuple<Ref, std::string, std::string>, ref_hash> val_to_var;
+    using val_t = std::tuple<Ref, std::string, std::string>;
+    std::unordered_map<Ref, val_t, ref_hash> var_to_val;
   
     const auto& original_inductive_vars = FindOriginalInductiveVars();
-    for (const auto& original : original_inductive_vars) {
-      val_to_var.emplace(
-        std::make_pair(original, std::make_tuple(original, "1", "0")));
+    for (const auto& var : original_inductive_vars) {
+      var_to_val[var] = val_t{var, "1", "0"};
     }
 
-    for (const auto& [var, val] : val_to_var) {
+    for (const auto& [var, val] : var_to_val) {
       const auto& [i, a, b] = val;
       std::cout << fn->tmp[i.val].name << " " << a << " " << b << std::endl;
     }
