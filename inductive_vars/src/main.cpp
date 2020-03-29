@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <vector>
+#include <functional>
 #include <unordered_set>
 #include <unordered_map>
 #include <iostream>
@@ -19,13 +20,6 @@ struct edge_hash {
   }
 };
 using Edges = std::unordered_set<Edge, edge_hash>;
-
-// j = <i, a, b> - for inductive variable. j = i*a + b
-struct Val {
-  uint i;
-  Ref a;
-  Ref b;
-};
 
 struct Loop {
   Blk* head;
@@ -51,32 +45,12 @@ struct Loop {
     }
   }
 
-  template<typename TIns, typename TPhi>
-  void ForEachInstruction(const TIns& do_ins, const TPhi& do_phi) {
-    for (auto blk : blocks) {
-      for (auto phi = blk->phi; phi; phi = phi->link) {
-        do_phi(*blk, *phi);
-      }
-      for (auto instr = blk->ins; instr < blk->ins + blk->nins; ++instr) {
-        do_ins(*blk, *instr);
-      }
-    }
-  }
-
   std::unordered_set<uint> GetDeclarations() {
     std::unordered_set<uint> declarations;
     ForEachInstruction(
       [&declarations](const Blk& blk, const Ins& ins) {
         if (ins.to.type == RTmp) {
           declarations.insert(ins.to.val);
-        }
-      }, 
-      [this, &declarations](const Blk& blk, const Phi& phi) {
-        for (auto blk = phi.blk; blk < phi.blk + phi.narg; ++blk) {
-          if (this->blocks.find(*blk) != blocks.cend()) {
-            declarations.insert(phi.to.val);
-            break;
-          }
         }
       }
     );
@@ -111,17 +85,6 @@ struct Loop {
           if (std::all_of(ins.arg, ins.arg + 2, is_invariant)) {
             invariant_vars.insert(ins.to.val);
           }
-        }, 
-        [this, &declared_out, &is_invariant](const Blk& blk, const Phi& phi) {
-          for (int i = 0; i < phi.narg; ++i) {
-            if (declared_out(phi.arg[i])) {
-              invariant_vars.insert(phi.arg[i].val);
-            }
-          }
-
-          if (std::all_of(phi.arg, phi.arg + phi.narg, is_invariant)) {
-            invariant_vars.insert(phi.to.type);
-          }
         }
       );
     } while (invariant_vars.size() != last_invariants_size);
@@ -137,7 +100,7 @@ struct Loop {
     return false;
   }
 
-  static bool IsBinaryOp(const Ins& ins) {
+  static constexpr bool IsBinaryOp(const Ins& ins) noexcept {
     return ins.to.type == RTmp;
   }
 
@@ -164,10 +127,19 @@ struct Loop {
     return candidates;
   }
 
-  void FindInductiveVars() {
-    std::unordered_map<uint, uint> val_to_var;
+  void FindInductiveVars(Fn* fn) {
+    std::unordered_map<uint, std::tuple<uint, std::string, std::string>> val_to_var;
+  
+    const auto& original_inductive_vars = FindOriginalInductiveVars();
+    for (const auto& original : original_inductive_vars) {
+      val_to_var.emplace(
+        std::make_pair(original, std::make_tuple(original, "1", "0")));
+    }
 
-    auto original_inductive_vars = FindOriginalInductiveVars();
+    for (const auto& [var, val] : val_to_var) {
+      const auto& [i, a, b] = val;
+      std::cout << fn->tmp[i].name << " " << a << " " << b << std::endl;
+    }
 
   }
 };
@@ -225,7 +197,7 @@ void LifehokkuDlyaSamuraev(Fn* fn) {
   fillpreds(fn);
   filluse(fn);
   memopt(fn);
-  ssa(fn);
+  filldom(fn);
 }
 
 
@@ -235,11 +207,12 @@ static void readfn(Fn *fn) {
   auto loops = FindLoops(fn->start);
   for (auto& loop : loops) {
     loop.FindInvariants(fn->tmp, fn->ntmp);
+    loop.FindInductiveVars(fn);
   }
 
   for (const auto& loop : loops) {
     for (const auto& block : loop.blocks) {
-      std::cout << block->id << " ";
+      std::cout << block->name << " ";
     }
     std::cout << " | ";
     for (const auto& inv : loop.invariant_vars) {
