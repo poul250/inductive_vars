@@ -5,8 +5,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <set>
-#include <map>
 
 #define export exports // for c++ compatibility
 extern "C" {
@@ -20,24 +18,24 @@ extern "C" {
 #define isarithm(o) (Oadd <= (o) && (o) <= Oshl)
 #define iscmp(o) (Oceqw <= (o) && (o) <= Ocuod)
 
-using Edge = std::pair<Blk*, Blk*>;
+using Edge = std::pair<const Blk*, const Blk*>;
 struct edge_hash {
   inline std::size_t operator()(const Edge& edge) const {
-    std::hash<Blk*> hasher;
+    std::hash<const Blk*> hasher;
     return hasher(edge.first) + hasher(edge.second);
   }
 };
 using Edges = std::unordered_set<Edge, edge_hash>;
 
 struct ref_hash {
-  inline std::size_t operator()(const Ref& ref) const {
+  inline std::size_t operator()(Ref ref) const {
     std::size_t result = ref.val;
     result |= ((ref.type) << 29);
     return result;
   }
 };
 
-bool operator==(const Ref& lhs, const Ref& rhs) noexcept {
+bool operator==(Ref lhs, Ref rhs) noexcept {
   return req(lhs, rhs);
 }
 
@@ -58,13 +56,14 @@ std::string to_string(Fn* fn, Ref ref) {
 }
 
 struct ReachingDefinitions {
-  std::unordered_map<Blk*, std::unordered_set<Ref, ref_hash>> gen;
-  std::unordered_map<Blk*, std::unordered_map<Ref, std::unordered_set<Blk*>, ref_hash>> kill;
-  std::unordered_map<Blk*, std::unordered_map<Ref, std::unordered_set<Blk*>, ref_hash>> in;
+  using RefToBlocks = 
+      std::unordered_map<Ref, std::unordered_set<const Blk*>, ref_hash>;
+  std::unordered_map<const Blk*, std::unordered_set<Ref, ref_hash>> gen;
+  std::unordered_map<const Blk*, RefToBlocks> kill;
+  std::unordered_map<const Blk*, RefToBlocks> in;
 
-  std::unordered_map<Ref, std::unordered_set<Blk*>, ref_hash>
-  GetNewIn(Blk* blk) {
-    std::unordered_map<Ref, std::unordered_set<Blk*>, ref_hash> new_in;
+  RefToBlocks GetNewIn(Blk* blk) {
+    RefToBlocks new_in;
     for (Blk** pred = blk->pred; pred < blk->pred + blk->npred; ++pred) {
       const auto& pred_gen = gen[*pred];
       const auto& pred_kill = kill[*pred];
@@ -75,10 +74,12 @@ struct ReachingDefinitions {
       for (const auto& [pred_in_ref, pred_in_blocks] : pred_in) {
         const auto& kill_ref_it = pred_kill.find(pred_in_ref);
         if(kill_ref_it == pred_kill.cend()) {
-          new_in[pred_in_ref].insert(pred_in_blocks.cbegin(), pred_in_blocks.cend());
+          new_in[pred_in_ref].insert(pred_in_blocks.cbegin(), 
+                                     pred_in_blocks.cend());
         } else {
           for (const auto& pred_in_block : pred_in_blocks) {
-            if (kill_ref_it->second.find(pred_in_block) == kill_ref_it->second.cend()) {
+            if (kill_ref_it->second.find(pred_in_block) == 
+                kill_ref_it->second.cend()) {
               new_in[pred_in_ref].insert(pred_in_block);
             }
           } 
@@ -102,7 +103,7 @@ struct ReachingDefinitions {
     }
 
     for (const auto& [blk, blk_gens] : gen) {
-      std::unordered_map<Ref, std::unordered_set<Blk*>, ref_hash> block_kills;
+      RefToBlocks block_kills;
       for (const auto& [other_blk, other_blk_gens] : gen) {
         if (blk == other_blk) {
           continue;
@@ -133,15 +134,15 @@ struct ReachingDefinitions {
 struct Loop {
   using val_t = std::tuple<Ref, std::string, std::string>;
 
-  Blk* head;
-  std::unordered_set<Blk*> blocks;
+  const Blk* head;
+  std::unordered_set<const Blk*> blocks;
   std::unordered_set<Ref, ref_hash> invariant_vars;
   std::unordered_map<Ref, std::vector<std::pair<Ref, val_t>>, ref_hash> inductive_families;
 
   template<class THead, class TBlocks>
   Loop(THead&& _head, TBlocks&& _blocks)
       : head(std::forward<THead>(_head))
-      , blocks(std::forward<TBlocks>(_blocks)) {
+      , blocks(std::forward<TBlocks>(_blocks))) {
   }
 
   bool operator==(const Loop& other) const noexcept {
@@ -157,28 +158,23 @@ struct Loop {
     }
   }
 
-  std::unordered_set<Ref, ref_hash> GetDeclarations() {
-    std::unordered_set<Ref, ref_hash> declarations;
-    ForEachInstruction(
-      [&declarations](const Blk& blk, const Ins& ins) {
-        if (isarithm(ins.op) || iscopy(ins.op) || iscmp) {
-          declarations.insert(ins.to);
-        }
+  bool IsDeclaredOut(ReachingDefinitions& rd, const Blk& blk, Ref ref) {
+    const auto reached_definitions = rd.in[&blk][ref];
+    return std::all_of(reached_definitions.begin(), reached_definitions.cend(),
+      [this](const Blk* blk) {
+        return this->blocks.find(blk) == this->blocks.cend();
       }
     );
-    return declarations;
   }
 
-
   // TODO: use reaching definitions
-  void FindInvariants(Tmp* tmp, int ntmp) {
-    const auto& declarations = GetDeclarations();
-
+  void FindInvariants(Fn* fn, ReachingDefinitions& rd) {
     auto is_invariant = [this](Ref ref) {
       return this->IsInvariant(ref);
     };
-    auto declared_out = [&declarations](Ref ref) -> bool {
-      return declarations.find(ref) == declarations.cend();
+
+    auto declared_out = [this, &rd](const Blk& blk, Ref ref) {
+      return this->IsDeclaredOut(rd, blk, ref);
     };
 
     size_t last_invariants_size;
@@ -187,11 +183,11 @@ struct Loop {
       
       ForEachInstruction(
         [this, &declared_out, &is_invariant](const Blk& blk, const Ins& ins) {
-          if (!(iscopy(ins.op) || isarithm(ins.op) || iscmp(ins.op))) {
+          if (ins.to.type != RTmp) {
             return;
           }
           for (auto ref = ins.arg; ref < ins.arg + 2; ++ref) {
-            if (ref->type == RTmp && declared_out(*ref)) {
+            if (ref->type == RTmp && declared_out(blk, *ref)) {
               this->invariant_vars.insert(*ref);
             }
           }
@@ -204,7 +200,7 @@ struct Loop {
     } while (invariant_vars.size() != last_invariants_size);
   }
 
-  bool IsInvariant(const Ref& ref) const {
+  bool IsInvariant(Ref ref) const {
     if (ref.type == RCon) {
       return true;
     }
@@ -227,7 +223,6 @@ struct Loop {
   bool IsDerivedIndactiveIns(
       const std::unordered_map<Ref, val_t, ref_hash> inductive_vars,
       const Ins& ins) {
-    
     if (ins.op == Oadd || ins.op == Omul) {
       return (inductive_vars.find(ins.arg[0]) != inductive_vars.cend() && 
               IsInvariant(ins.arg[1]) || IsInvariant(ins.arg[0]) && 
@@ -260,7 +255,7 @@ struct Loop {
     return candidates;
   }
 
-  int CountDefinitions(const Ref& ref) {
+  int CountDefinitions(Ref ref) {
     int result = 0;
     ForEachInstruction(
       [&ref, &result](const Blk&, const Ins& ins) {
@@ -271,10 +266,8 @@ struct Loop {
     return result;
   }
 
-  void AddVal(
-      Fn* fn, 
-      std::unordered_map<Ref, val_t, ref_hash>& inductives, 
-      const Ins& ins) {
+  void AddVal(Fn* fn,  std::unordered_map<Ref, val_t, ref_hash>& inductives, 
+              const Ins& ins) {
     int ind_var = inductives.find(ins.arg[0]) != inductives.cend();
     int inv_var = 1 - ind_var;
     
@@ -348,7 +341,8 @@ Edges FindBackEdges(Blk *start) {
   return back_edges;
 }
 
-void ExtendWithLoopBlocks(std::unordered_set<Blk*>& blocks, Blk* cur_block) {
+void ExtendWithLoopBlocks(std::unordered_set<const Blk*>& blocks, 
+                          const Blk* cur_block) {
   if (blocks.find(cur_block) != blocks.cend()) {
     return;
   }
@@ -361,7 +355,7 @@ void ExtendWithLoopBlocks(std::unordered_set<Blk*>& blocks, Blk* cur_block) {
 
 Loop FindLoop(const Edge& back_edge) {
   const auto& [start_block, loop_head] = back_edge;
-  std::unordered_set<Blk*> loop_blocks = {loop_head};
+  std::unordered_set<const Blk*> loop_blocks = {loop_head};
 
   ExtendWithLoopBlocks(loop_blocks, start_block);
   return {loop_head, std::move(loop_blocks)};
@@ -398,21 +392,10 @@ static void readfn(Fn *fn) {
   ReachingDefinitions rd;
   rd.FindReachingDefinitions(fn);
 
-  for (const auto& [blk, reaching] : rd.in) {
-    std::cout << blk->name << ":" << std::endl;
-    for (const auto& [ref, blocks] : reaching) {
-      std::cout << "\t" << fn->tmp[ref.val].name << ": ";
-      for (const auto& blk : blocks) {
-        std::cout << blk->name << ", ";
-      }
-      std::cout << std::endl;
-    }
-  }
-
   auto loops = FindLoops(fn->start);
 
   for (auto& loop : loops) {
-    loop.FindInvariants(fn->tmp, fn->ntmp);
+    loop.FindInvariants(fn, rd);
     loop.FindInductiveVars(fn, rd);
     std::cout << "blocks: ";
     for (const auto& block : loop.blocks) {
