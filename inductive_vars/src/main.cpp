@@ -15,10 +15,8 @@ extern "C" {
 // defines are bad practice in c++, but for similarity with another defines
 #define ismath(o) (Oadd <= (o) && (o) <= Ocuod)
 #define iscopy(o) ((o) == Ocopy)
-
-
-
-
+#define isarithm(o) (Oadd <= (o) && (o) <= Oshl)
+#define iscmp(o) (Oceqw <= (o) && (o) <= Ocuod)
 
 using Edge = std::pair<Blk*, Blk*>;
 struct edge_hash {
@@ -41,10 +39,29 @@ bool operator==(const Ref& lhs, const Ref& rhs) noexcept {
   return req(lhs, rhs);
 }
 
+std::string to_string(Fn* fn, Ref ref) {
+  if (ref.type == RCon) {
+    const auto& con = fn->con[ref.val];
+    if (con.flt == 0) {
+      return std::to_string(con.bits.i);
+    } else if (con.flt == 1) {
+      return std::to_string(con.bits.s);
+    } else {
+      return std::to_string(con.bits.d);
+    }
+  } else if (ref.type == RTmp) {
+    return {fn->tmp[ref.val].name};
+  }
+  throw std::runtime_error("Unknown ref.type");
+}
+
 struct Loop {
+  using val_t = std::tuple<Ref, std::string, std::string>;
+
   Blk* head;
   std::unordered_set<Blk*> blocks;
   std::unordered_set<Ref, ref_hash> invariant_vars;
+  std::unordered_map<Ref, std::vector<std::pair<Ref, val_t>>, ref_hash> inductive_families;
 
   template<class THead, class TBlocks>
   Loop(THead&& _head, TBlocks&& _blocks)
@@ -65,12 +82,12 @@ struct Loop {
     }
   }
 
-  std::unordered_set<uint> GetDeclarations() {
-    std::unordered_set<uint> declarations;
+  std::unordered_set<Ref, ref_hash> GetDeclarations() {
+    std::unordered_set<Ref, ref_hash> declarations;
     ForEachInstruction(
       [&declarations](const Blk& blk, const Ins& ins) {
-        if (ins.to.type == RTmp) {
-          declarations.insert(ins.to.val);
+        if (isarithm(ins.op) || iscopy(ins.op) || iscmp) {
+          declarations.insert(ins.to);
         }
       }
     );
@@ -85,7 +102,7 @@ struct Loop {
       return this->IsInvariant(ref);
     };
     auto declared_out = [&declarations](Ref ref) -> bool {
-      return declarations.find(ref.val) == declarations.cend();
+      return declarations.find(ref) == declarations.cend();
     };
 
     size_t last_invariants_size;
@@ -94,16 +111,16 @@ struct Loop {
       
       ForEachInstruction(
         [this, &declared_out, &is_invariant](const Blk& blk, const Ins& ins) {
-          if (ins.to.type != RTmp) {
+          if (!(iscopy(ins.op) || isarithm(ins.op) || iscmp(ins.op))) {
             return;
           }
           for (auto ref = ins.arg; ref < ins.arg + 2; ++ref) {
-            if (declared_out(*ref)) {
-              invariant_vars.insert(*ref);
+            if (ref->type == RTmp && declared_out(*ref)) {
+              this->invariant_vars.insert(*ref);
             }
           }
           if (std::all_of(ins.arg, ins.arg + 2, is_invariant)) {
-            invariant_vars.insert(ins.to);
+            this->invariant_vars.insert(ins.to);
           }
         }
       );
@@ -121,12 +138,27 @@ struct Loop {
     return false;
   }
 
-  bool IsInductiveIns(const Ins& ins) {
+  bool IsBaseInductiveIns(const Ins& ins) {
     if (ins.op == Oadd) {
       return ((ins.to == ins.arg[0] && IsInvariant(ins.arg[1]) ||
               ins.to == ins.arg[1] && IsInvariant(ins.arg[0])));
     } else if (ins.op == Osub) {
       return (ins.to == ins.arg[0] && IsInvariant(ins.arg[1]));
+    }
+    return false;
+  }
+
+  bool IsDerivedIndactiveIns(
+      const std::unordered_map<Ref, val_t, ref_hash> inductive_vars,
+      const Ins& ins) {
+    
+    if (ins.op == Oadd || ins.op == Omul) {
+      return (inductive_vars.find(ins.arg[0]) != inductive_vars.cend() && 
+              IsInvariant(ins.arg[1]) || IsInvariant(ins.arg[0]) && 
+              inductive_vars.find(ins.arg[1]) != inductive_vars.cend());
+    } else if (ins.op == Osub) {
+      return (inductive_vars.find(ins.arg[0]) != inductive_vars.cend() &&
+              IsInvariant(ins.arg[1]));
     }
     return false;
   }
@@ -139,7 +171,8 @@ struct Loop {
       [this, &candidates, &not_inductive](const Blk& blk, const Ins& ins) {
         if (ins.to.type == RTmp) {
           if (not_inductive.find(ins.to) == not_inductive.cend() && 
-              this->IsInductiveIns(ins)) {
+              candidates.find(ins.to) == candidates.cend() &&
+              this->IsBaseInductiveIns(ins)) {
             candidates.insert(ins.to);
           } else {
             candidates.erase(ins.to);
@@ -151,30 +184,76 @@ struct Loop {
     return candidates;
   }
 
-  void FindInductiveVars(Fn* fn) {
-    using val_t = std::tuple<Ref, std::string, std::string>;
-    std::unordered_map<Ref, val_t, ref_hash> var_to_val;
-    std::unordered_set<Ref, ref_hash> not_inductive;
-    std::deque<std::pair<Ref, val_t>> work_list;  
-
-    const auto& base_inductive_vars = FindBaseInductiveVars();
-    for (const auto& var : base_inductive_vars) {
-      // var_to_val[var] = val_t{var, "1", "0"};
-      work_list.emplace_back(var, val_t{var, "1", "0"});
-    }
-
+  int CountDefinitions(const Ref& ref) {
+    int result = 0;
     ForEachInstruction(
-      [](const Blk&, const Ins& ins) {
-        if (ismath(ins.op)) {
-
-        }
+      [&ref, &result](const Blk&, const Ins& ins) {
+        result += ((ismath(ins.op) || iscopy(ins.op)) && ins.to == ref);
       }
     );
 
-    for (const auto& [var, val] : var_to_val) {
-      const auto& [i, a, b] = val;
-      std::cout << fn->tmp[i.val].name << " " << a << " " << b << std::endl;
+    return result;
+  }
+
+  void AddVal(
+      Fn* fn, 
+      std::unordered_map<Ref, val_t, ref_hash>& inductives, 
+      const Ins& ins) {
+    int ind_var = inductives.find(ins.arg[0]) != inductives.cend();
+    int inv_var = 1 - ind_var;
+    
+    const auto& [i, a, b] = inductives[ins.arg[ind_var]];
+    const auto& inv_as_str = to_string(fn, ins.arg[inv_var]);
+
+    if (ins.op == Oadd) {
+      inductives[ins.to] = {i, a, "(" + b + ")+" + inv_as_str};
+    } else if (ins.op == Osub) {
+      inductives[ins.to] = {i, a, "(" + b + ")-" + inv_as_str};
+    } else if (ins.op == Omul) {
+      inductives[ins.to] = {i, "(" + a + ")*" + inv_as_str, 
+                               "(" + b + ")*" + inv_as_str};
     }
+  }
+  
+  std::unordered_map<Ref, std::vector<std::pair<Ref, val_t>>, ref_hash>
+  GetFamilies(const std::unordered_map<Ref, val_t, ref_hash>& inds) {
+    std::unordered_map<Ref, std::vector<std::pair<Ref, val_t>>, ref_hash> res;
+
+    for (const auto& [var, val] : inds) {
+      const auto& [i, a, b] = val;
+      res[i].emplace_back(var, val);
+    }
+    return res;
+  }
+
+  void FindInductiveVars(Fn* fn) {
+    std::unordered_map<Ref, val_t, ref_hash> var_to_val;
+    std::unordered_set<Ref, ref_hash> not_inductive;
+
+    const auto& base_inductive_vars = FindBaseInductiveVars();
+    for (const auto& var : base_inductive_vars) {
+      var_to_val[var] = {var, "1", "0"};
+    }
+
+    size_t last_var_to_val_size;
+    do {
+      last_var_to_val_size = var_to_val.size();
+      ForEachInstruction(
+        [this, fn, &var_to_val](const Blk&, const Ins& ins) {
+          if (ismath(ins.op)) {
+            if (var_to_val.find(ins.to) == var_to_val.cend() &&
+                this->IsDerivedIndactiveIns(var_to_val, ins) &&
+                this->CountDefinitions(ins.to) == 1) {
+              // TODO: check also no other definitions between
+              // (last frames in 6.4.3)
+              this->AddVal(fn, var_to_val, ins);
+            }
+          }
+        }
+      );
+    } while (var_to_val.size() != last_var_to_val_size);
+
+    this->inductive_families = GetFamilies(var_to_val);
   }
 };
 
@@ -239,21 +318,30 @@ void LifehokkuDlyaSamuraev(Fn* fn) {
 static void readfn(Fn *fn) {
   LifehokkuDlyaSamuraev(fn);
   printfn(fn, stdout);
+
   auto loops = FindLoops(fn->start);
+
   for (auto& loop : loops) {
     loop.FindInvariants(fn->tmp, fn->ntmp);
     loop.FindInductiveVars(fn);
-  }
-
-  for (const auto& loop : loops) {
+    std::cout << "blocks: ";
     for (const auto& block : loop.blocks) {
       std::cout << block->name << " ";
     }
-    std::cout << " | ";
+    std::cout << "| invariant variables: ";
     for (const auto& inv : loop.invariant_vars) {
       std::cout << fn->tmp[inv.val].name << " ";
     }
     std::cout << std::endl;
+    for (const auto& [ind, family] : loop.inductive_families) {
+      std::cout << to_string(fn, ind) << ":" << std::endl;
+      for (const auto& [name, val] : family) {
+        const auto& [i, a, b] = val;
+        std::cout << "\t" << to_string(fn, name) << " = " 
+                  << "<" << to_string(fn, i) << ", " << a << ", " << b << ">" 
+                  << std::endl;
+      }
+    }
   }
 }
 
