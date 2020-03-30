@@ -85,6 +85,8 @@ struct ReachingDefinitions {
         }
       }
     }
+
+    return new_in;
   }
 
   void FindReachingDefinitions(Fn* fn) {
