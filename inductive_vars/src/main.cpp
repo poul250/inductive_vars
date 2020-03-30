@@ -5,6 +5,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <set>
+#include <map>
 
 #define export exports // for c++ compatibility
 extern "C" {
@@ -55,6 +57,77 @@ std::string to_string(Fn* fn, Ref ref) {
   throw std::runtime_error("Unknown ref.type");
 }
 
+struct ReachingDefinitions {
+  std::unordered_map<Blk*, std::unordered_set<Ref, ref_hash>> gen;
+  std::unordered_map<Blk*, std::unordered_map<Ref, std::unordered_set<Blk*>, ref_hash>> kill;
+  std::unordered_map<Blk*, std::unordered_map<Ref, std::unordered_set<Blk*>, ref_hash>> in;
+
+  std::unordered_map<Ref, std::unordered_set<Blk*>, ref_hash>
+  GetNewIn(Blk* blk) {
+    std::unordered_map<Ref, std::unordered_set<Blk*>, ref_hash> new_in;
+    for (Blk** pred = blk->pred; pred < blk->pred + blk->npred; ++pred) {
+      const auto& pred_gen = gen[*pred];
+      const auto& pred_kill = kill[*pred];
+      const auto& pred_in = in[*pred];
+      for (const auto& pred_gen_ref : pred_gen) {
+        new_in[pred_gen_ref].insert(*pred);
+      }
+      for (const auto& [pred_in_ref, pred_in_blocks] : pred_in) {
+        const auto& kill_ref_it = pred_kill.find(pred_in_ref);
+        if(kill_ref_it == pred_kill.cend()) {
+          new_in[pred_in_ref].insert(pred_in_blocks.cbegin(), pred_in_blocks.cend());
+        } else {
+          for (const auto& pred_in_block : pred_in_blocks) {
+            if (kill_ref_it->second.find(pred_in_block) == kill_ref_it->second.cend()) {
+              new_in[pred_in_ref].insert(pred_in_block);
+            }
+          } 
+        }
+      }
+    }
+  }
+
+  void FindReachingDefinitions(Fn* fn) {
+    for (Blk *blk = fn->start; blk; blk = blk->link) {
+      std::unordered_set<Ref, ref_hash> block_gens;
+
+      for (uint i = 0; i < blk->nins; ++i) {
+          if (blk->nins && Tmp0 <= blk->ins[i].to.val) {
+              block_gens.insert(blk->ins[i].to);
+          }
+      }
+      gen.emplace(blk, std::move(block_gens));
+    }
+
+    for (const auto& [blk, blk_gens] : gen) {
+      std::unordered_map<Ref, std::unordered_set<Blk*>, ref_hash> block_kills;
+      for (const auto& [other_blk, other_blk_gens] : gen) {
+        if (blk == other_blk) {
+          continue;
+        }
+        for (const auto& blk_gen : blk_gens) {
+          if (other_blk_gens.find(blk_gen) != other_blk_gens.cend()) {
+            block_kills[blk_gen].insert(other_blk);
+          }
+        }
+      }
+      kill.emplace(blk, std::move(block_kills));
+    }
+
+    bool change = true;
+    while (change) {
+      change = false;
+      for (Blk *blk = fn->start; blk; blk = blk->link) {
+        auto&& new_in = GetNewIn(blk);
+        if (in[blk] != new_in) {
+          in[blk] = std::move(new_in);
+          change = true;
+        }
+      }
+    }
+  }
+};
+
 struct Loop {
   using val_t = std::tuple<Ref, std::string, std::string>;
 
@@ -93,6 +166,7 @@ struct Loop {
     );
     return declarations;
   }
+
 
   // TODO: use reaching definitions
   void FindInvariants(Tmp* tmp, int ntmp) {
@@ -226,7 +300,7 @@ struct Loop {
     return res;
   }
 
-  void FindInductiveVars(Fn* fn) {
+  void FindInductiveVars(Fn* fn, const ReachingDefinitions& rd) {
     std::unordered_map<Ref, val_t, ref_hash> var_to_val;
     std::unordered_set<Ref, ref_hash> not_inductive;
 
@@ -319,11 +393,25 @@ static void readfn(Fn *fn) {
   LifehokkuDlyaSamuraev(fn);
   printfn(fn, stdout);
 
+  ReachingDefinitions rd;
+  rd.FindReachingDefinitions(fn);
+
+  for (const auto& [blk, reaching] : rd.in) {
+    std::cout << blk->name << ":" << std::endl;
+    for (const auto& [ref, blocks] : reaching) {
+      std::cout << "\t" << fn->tmp[ref.val].name << ": ";
+      for (const auto& blk : blocks) {
+        std::cout << blk->name << ", ";
+      }
+      std::cout << std::endl;
+    }
+  }
+
   auto loops = FindLoops(fn->start);
 
   for (auto& loop : loops) {
     loop.FindInvariants(fn->tmp, fn->ntmp);
-    loop.FindInductiveVars(fn);
+    loop.FindInductiveVars(fn, rd);
     std::cout << "blocks: ";
     for (const auto& block : loop.blocks) {
       std::cout << block->name << " ";
