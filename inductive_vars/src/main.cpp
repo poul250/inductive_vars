@@ -12,6 +12,13 @@ extern "C" {
 }
 #undef export
 
+// defines are bad practice in c++, but for similarity with another defines
+#define ismath(o) (Oadd <= (o) && (o) <= Ocuod)
+#define iscopy(o) ((o) == Ocopy)
+
+
+
+
 
 using Edge = std::pair<Blk*, Blk*>;
 struct edge_hash {
@@ -25,7 +32,7 @@ using Edges = std::unordered_set<Edge, edge_hash>;
 struct ref_hash {
   inline std::size_t operator()(const Ref& ref) const {
     std::size_t result = ref.val;
-    result |= ((ref.type) << 28);
+    result |= ((ref.type) << 29);
     return result;
   }
 };
@@ -39,7 +46,7 @@ struct Loop {
   std::unordered_set<Blk*> blocks;
   std::unordered_set<Ref, ref_hash> invariant_vars;
 
-  template<typename THead, typename TBlocks>
+  template<class THead, class TBlocks>
   Loop(THead&& _head, TBlocks&& _blocks)
       : head(std::forward<THead>(_head))
       , blocks(std::forward<TBlocks>(_blocks)) {
@@ -49,7 +56,7 @@ struct Loop {
     return head == other.head && blocks == other.blocks;
   }
 
-  template<typename TFunc>
+  template<class TFunc>
   void ForEachInstruction(const TFunc& func) {
     for (auto blk : blocks) {
       for (auto instr = blk->ins; instr < blk->ins + blk->nins; ++instr) {
@@ -100,6 +107,7 @@ struct Loop {
           }
         }
       );
+  
     } while (invariant_vars.size() != last_invariants_size);
   }
 
@@ -123,7 +131,7 @@ struct Loop {
     return false;
   }
 
-  std::unordered_set<Ref, ref_hash> FindOriginalInductiveVars() {
+  std::unordered_set<Ref, ref_hash> FindBaseInductiveVars() {
     std::unordered_set<Ref, ref_hash> candidates;
     std::unordered_set<Ref, ref_hash> not_inductive;
 
@@ -146,11 +154,22 @@ struct Loop {
   void FindInductiveVars(Fn* fn) {
     using val_t = std::tuple<Ref, std::string, std::string>;
     std::unordered_map<Ref, val_t, ref_hash> var_to_val;
-  
-    const auto& original_inductive_vars = FindOriginalInductiveVars();
-    for (const auto& var : original_inductive_vars) {
-      var_to_val[var] = val_t{var, "1", "0"};
+    std::unordered_set<Ref, ref_hash> not_inductive;
+    std::deque<std::pair<Ref, val_t>> work_list;  
+
+    const auto& base_inductive_vars = FindBaseInductiveVars();
+    for (const auto& var : base_inductive_vars) {
+      // var_to_val[var] = val_t{var, "1", "0"};
+      work_list.emplace_back(var, val_t{var, "1", "0"});
     }
+
+    ForEachInstruction(
+      [](const Blk&, const Ins& ins) {
+        if (ismath(ins.op)) {
+
+        }
+      }
+    );
 
     for (const auto& [var, val] : var_to_val) {
       const auto& [i, a, b] = val;
@@ -158,6 +177,7 @@ struct Loop {
     }
   }
 };
+
 
 Edges FindBackEdges(Blk *start) {
   Edges back_edges;
