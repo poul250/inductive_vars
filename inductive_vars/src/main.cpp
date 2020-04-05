@@ -1,7 +1,7 @@
 #include <algorithm>
-#include <deque>
 #include <functional>
 #include <iostream>
+#include <numeric>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -18,6 +18,20 @@ extern "C" {
 #define isarithm(o) (Oadd <= (o) && (o) <= Oshl)
 #define iscmp(o) (Oceqw <= (o) && (o) <= Ocuod)
 
+// c++20 feature, code it by nahds D;
+template<class Key, class Value, class Hash = std::hash<Key>>
+struct hash_map : public std::unordered_map<Key, Value, Hash> {
+  bool contains(const Key& key) const {
+    return this->find(key) != this->cend();
+  }
+};
+template<class Key, class Hash = std::hash<Key>>
+struct hash_set : public std::unordered_set<Key, Hash> {
+  bool contains(const Key& key) const {
+    return this->find(key) != this->cend();
+  }
+};
+
 using Edge = std::pair<const Blk*, const Blk*>;
 struct edge_hash {
   inline std::size_t operator()(const Edge& edge) const {
@@ -25,7 +39,7 @@ struct edge_hash {
     return hasher(edge.first) + hasher(edge.second);
   }
 };
-using Edges = std::unordered_set<Edge, edge_hash>;
+using Edges = hash_set<Edge, edge_hash>;
 
 struct ref_hash {
   inline std::size_t operator()(Ref ref) const {
@@ -34,9 +48,14 @@ struct ref_hash {
     return result;
   }
 };
+using val_t = std::tuple<Ref, std::string, std::string>;
 
 bool operator==(Ref lhs, Ref rhs) noexcept {
   return req(lhs, rhs);
+}
+
+bool dom(const Blk* blk, const Blk* dom_this) {
+  return dom(const_cast<Blk*>(blk), const_cast<Blk*>(dom_this));
 }
 
 std::string to_string(Fn* fn, Ref ref) {
@@ -57,10 +76,10 @@ std::string to_string(Fn* fn, Ref ref) {
 
 struct ReachingDefinitions {
   using RefToBlocks = 
-      std::unordered_map<Ref, std::unordered_set<const Blk*>, ref_hash>;
-  std::unordered_map<const Blk*, std::unordered_set<Ref, ref_hash>> gen;
-  std::unordered_map<const Blk*, RefToBlocks> kill;
-  std::unordered_map<const Blk*, RefToBlocks> in;
+      hash_map<Ref, hash_set<const Blk*>, ref_hash>;
+  hash_map<const Blk*, hash_set<Ref, ref_hash>> gen;
+  hash_map<const Blk*, RefToBlocks> kill;
+  hash_map<const Blk*, RefToBlocks> in;
 
   RefToBlocks GetNewIn(Blk* blk) {
     RefToBlocks new_in;
@@ -78,8 +97,7 @@ struct ReachingDefinitions {
                                      pred_in_blocks.cend());
         } else {
           for (const auto& pred_in_block : pred_in_blocks) {
-            if (kill_ref_it->second.find(pred_in_block) == 
-                kill_ref_it->second.cend()) {
+            if (!kill_ref_it->second.contains(pred_in_block)) {
               new_in[pred_in_ref].insert(pred_in_block);
             }
           } 
@@ -91,9 +109,12 @@ struct ReachingDefinitions {
   }
 
   void FindReachingDefinitions(Fn* fn) {
+    hash_set<Blk*> blocks;
     for (Blk *blk = fn->start; blk; blk = blk->link) {
-      std::unordered_set<Ref, ref_hash> block_gens;
-
+      blocks.insert(blk);
+    }
+    for (const Blk* blk : blocks) {
+      hash_set<Ref, ref_hash> block_gens;
       for (uint i = 0; i < blk->nins; ++i) {
           if (blk->nins && Tmp0 <= blk->ins[i].to.val) {
               block_gens.insert(blk->ins[i].to);
@@ -109,7 +130,7 @@ struct ReachingDefinitions {
           continue;
         }
         for (const auto& blk_gen : blk_gens) {
-          if (other_blk_gens.find(blk_gen) != other_blk_gens.cend()) {
+          if (other_blk_gens.contains(blk_gen)) {
             block_kills[blk_gen].insert(other_blk);
           }
         }
@@ -132,17 +153,15 @@ struct ReachingDefinitions {
 };
 
 struct Loop {
-  using val_t = std::tuple<Ref, std::string, std::string>;
-
   const Blk* head;
-  std::unordered_set<const Blk*> blocks;
-  std::unordered_set<Ref, ref_hash> invariant_vars;
-  std::unordered_map<Ref, std::vector<std::pair<Ref, val_t>>, ref_hash> inductive_families;
+  hash_set<const Blk*> blocks;
+  hash_set<const Ins*> invariant_statements;
+  hash_map<Ref, std::vector<std::pair<Ref, val_t>>, ref_hash> inductive_families;
 
   template<class THead, class TBlocks>
   Loop(THead&& _head, TBlocks&& _blocks)
       : head(std::forward<THead>(_head))
-      , blocks(std::forward<TBlocks>(_blocks))) {
+      , blocks(std::forward<TBlocks>(_blocks)) {
   }
 
   bool operator==(const Loop& other) const noexcept {
@@ -158,96 +177,122 @@ struct Loop {
     }
   }
 
-  bool IsDeclaredOut(ReachingDefinitions& rd, const Blk& blk, Ref ref) {
-    const auto reached_definitions = rd.in[&blk][ref];
-    return std::all_of(reached_definitions.begin(), reached_definitions.cend(),
-      [this](const Blk* blk) {
-        return this->blocks.find(blk) == this->blocks.cend();
-      }
-    );
-  }
-
-  // TODO: use reaching definitions
-  void FindInvariants(Fn* fn, ReachingDefinitions& rd) {
-    auto is_invariant = [this](Ref ref) {
-      return this->IsInvariant(ref);
-    };
-
-    auto declared_out = [this, &rd](const Blk& blk, Ref ref) {
-      return this->IsDeclaredOut(rd, blk, ref);
-    };
-
-    size_t last_invariants_size;
-    do {
-      last_invariants_size = invariant_vars.size();
-      
-      ForEachInstruction(
-        [this, &declared_out, &is_invariant](const Blk& blk, const Ins& ins) {
-          if (ins.to.type != RTmp) {
-            return;
-          }
-          for (auto ref = ins.arg; ref < ins.arg + 2; ++ref) {
-            if (ref->type == RTmp && declared_out(blk, *ref)) {
-              this->invariant_vars.insert(*ref);
-            }
-          }
-          if (std::all_of(ins.arg, ins.arg + 2, is_invariant)) {
-            this->invariant_vars.insert(ins.to);
-          }
-        }
-      );
-  
-    } while (invariant_vars.size() != last_invariants_size);
-  }
-
-  bool IsInvariant(Ref ref) const {
+  bool IsInvariantArg(ReachingDefinitions& rd, const Blk& blk, 
+                          const Ins& instr, Ref ref) {
     if (ref.type == RCon) {
       return true;
     }
-    if (invariant_vars.find(ref) != invariant_vars.cend()) {
+
+    const auto& reaching_blocks = rd.in[&blk][ref];
+
+    // check that all reaching definitions are out of the loop
+    bool all_definitions_out = std::all_of(
+      reaching_blocks.cbegin(), reaching_blocks.cend(),
+      [this](const auto& blk) { return !this->blocks.contains(blk); }
+    );
+    if (all_definitions_out) {
       return true;
     }
+
+    // should have only one reaching definition and in the loop.
+    // try to find invariant reaching definition in this block
+    for (const Ins* ins = &instr - 1; ins != blk.ins - 1; --ins) {
+      if (ins->to == ref) {
+        return invariant_statements.contains(ins);
+      }
+    }
+
+    if (reaching_blocks.size() > 1) {
+      return false;
+    }
+    const auto& reaching_blk = *reaching_blocks.begin();
+
+    for (const Ins* ins = reaching_blk->ins + reaching_blk->nins - 1; 
+        ins != reaching_blk->ins - 1; --ins) {
+      if (ins->to == ref) {
+        return invariant_statements.contains(ins);
+      }
+    }
     return false;
   }
 
-  bool IsBaseInductiveIns(const Ins& ins) {
+  hash_set<const Blk*> GetExitBlocks() {
+    hash_set<const Blk*> result;
+    for (const Blk* blk : blocks) {
+      if (blk->s1 && !blocks.contains(blk->s1)) {
+        result.insert(blk);
+      } else if (blk->s2 && !blocks.contains(blk->s2)) {
+        result.insert(blk);
+      }
+    }
+    return result;
+  }
+
+  hash_map<const Ref, int, ref_hash> CountDefinitions() {
+    hash_map<const Ref, int, ref_hash> result;
+    ForEachInstruction([&result](const Blk&, const Ins& ins) {
+      if (ins.to.type == RTmp) {
+        ++result[ins.to];
+      }
+    });
+    return result;
+  }
+
+  void FindInvariants(Fn* fn, ReachingDefinitions& rd) {
+    size_t last_invariants_size;
+    const auto& definitions = CountDefinitions();
+    const auto& exit_blocks = GetExitBlocks();
+
+    do {
+      last_invariants_size = invariant_statements.size();
+      
+      for (const Blk* blk : blocks) {
+        bool dom_exits = std::all_of(exit_blocks.begin(), exit_blocks.end(),
+          [blk](const Blk* exit_blk) { return dom(blk, exit_blk); });
+        if (!dom_exits) continue;
+  
+        for (const Ins* ins = blk->ins; ins != blk->ins + blk->nins; ++ins) {
+          if (ins->to.type != RTmp || definitions.at(ins->to) != 1) continue;
+  
+          for (const Ref* ref = ins->arg; ref < ins->arg + 1 + !iscopy(ins->op); ++ref) {
+            if (!IsInvariantArg(rd, *blk, *ins, *ref)) continue;
+          }
+          invariant_statements.insert(ins);
+        }
+      }
+  
+    } while (invariant_statements.size() != last_invariants_size);
+  }
+
+  bool IsBaseInductiveIns(ReachingDefinitions& rd, const Blk& blk,
+                          const Ins& ins) {
     if (ins.op == Oadd) {
-      return ((ins.to == ins.arg[0] && IsInvariant(ins.arg[1]) ||
-              ins.to == ins.arg[1] && IsInvariant(ins.arg[0])));
+      if (ins.to == ins.arg[0] && IsInvariantArg(rd, blk, ins, ins.arg[1]) ||
+          ins.to == ins.arg[1] && IsInvariantArg(rd, blk, ins, ins.arg[0])) {
+        return true;
+      }
+      return false;
     } else if (ins.op == Osub) {
-      return (ins.to == ins.arg[0] && IsInvariant(ins.arg[1]));
+      return (ins.to == ins.arg[0] && IsInvariantArg(rd, blk, ins, ins.arg[1]));
     }
     return false;
   }
 
-  bool IsDerivedIndactiveIns(
-      const std::unordered_map<Ref, val_t, ref_hash> inductive_vars,
-      const Ins& ins) {
-    if (ins.op == Oadd || ins.op == Omul) {
-      return (inductive_vars.find(ins.arg[0]) != inductive_vars.cend() && 
-              IsInvariant(ins.arg[1]) || IsInvariant(ins.arg[0]) && 
-              inductive_vars.find(ins.arg[1]) != inductive_vars.cend());
-    } else if (ins.op == Osub) {
-      return (inductive_vars.find(ins.arg[0]) != inductive_vars.cend() &&
-              IsInvariant(ins.arg[1]));
-    }
-    return false;
-  }
-
-  std::unordered_set<Ref, ref_hash> FindBaseInductiveVars() {
-    std::unordered_set<Ref, ref_hash> candidates;
-    std::unordered_set<Ref, ref_hash> not_inductive;
+  hash_set<Ref, ref_hash> FindBaseInductiveVars(
+      ReachingDefinitions& rd) {
+    hash_set<Ref, ref_hash> candidates;
+    hash_set<Ref, ref_hash> not_base_inductive;
 
     ForEachInstruction(
-      [this, &candidates, &not_inductive](const Blk& blk, const Ins& ins) {
+      [this, &rd, &candidates, &not_base_inductive](const Blk& blk, const Ins& ins) {
         if (ins.to.type == RTmp) {
-          if (not_inductive.find(ins.to) == not_inductive.cend() && 
-              candidates.find(ins.to) == candidates.cend() &&
-              this->IsBaseInductiveIns(ins)) {
+          if (!not_base_inductive.contains(ins.to) && 
+              !candidates.contains(ins.to) &&
+              this->IsBaseInductiveIns(rd, blk, ins)) {
             candidates.insert(ins.to);
           } else {
             candidates.erase(ins.to);
-            not_inductive.insert(ins.to);
+            not_base_inductive.insert(ins.to);
           }
         }
       }
@@ -255,77 +300,106 @@ struct Loop {
     return candidates;
   }
 
-  int CountDefinitions(Ref ref) {
-    int result = 0;
-    ForEachInstruction(
-      [&ref, &result](const Blk&, const Ins& ins) {
-        result += ((ismath(ins.op) || iscopy(ins.op)) && ins.to == ref);
-      }
-    );
 
-    return result;
-  }
-
-  void AddVal(Fn* fn,  std::unordered_map<Ref, val_t, ref_hash>& inductives, 
-              const Ins& ins) {
-    int ind_var = inductives.find(ins.arg[0]) != inductives.cend();
-    int inv_var = 1 - ind_var;
-    
-    const auto& [i, a, b] = inductives[ins.arg[ind_var]];
-    const auto& inv_as_str = to_string(fn, ins.arg[inv_var]);
-
-    if (ins.op == Oadd) {
-      inductives[ins.to] = {i, a, "(" + b + ")+" + inv_as_str};
-    } else if (ins.op == Osub) {
-      inductives[ins.to] = {i, a, "(" + b + ")-" + inv_as_str};
-    } else if (ins.op == Omul) {
-      inductives[ins.to] = {i, "(" + a + ")*" + inv_as_str, 
-                               "(" + b + ")*" + inv_as_str};
+  val_t CreateVal(Fn* fn, const val_t& derived_from, int op, Ref inv) {
+    const auto& [i, a, b] = derived_from;
+    const auto& sinv = to_string(fn, inv);
+    if (op == Oadd) {
+      return {i, a, "(" + b + ")+" + sinv};
+    } else if (op == Osub) {
+      return {i, a, "(" + b + ")-" + sinv};
+    } else if (op == Omul) {
+      return {i, "(" + a + ")*" + sinv, "(" + b + ")*" + sinv};
+    } else {
+      throw std::runtime_error("CreateVal Error");
     }
   }
   
-  std::unordered_map<Ref, std::vector<std::pair<Ref, val_t>>, ref_hash>
-  GetFamilies(const std::unordered_map<Ref, val_t, ref_hash>& inds) {
-    std::unordered_map<Ref, std::vector<std::pair<Ref, val_t>>, ref_hash> res;
+  hash_map<Ref, std::vector<std::pair<Ref, val_t>>, ref_hash>
+  GetFamilies(const hash_map<Ref, val_t, ref_hash>& inds) {
+    hash_map<Ref, std::vector<std::pair<Ref, val_t>>, ref_hash> result;
 
     for (const auto& [var, val] : inds) {
       const auto& [i, a, b] = val;
-      res[i].emplace_back(var, val);
+      result[i].emplace_back(var, val);
     }
-    return res;
+    return result;
   }
 
-  void FindInductiveVars(Fn* fn, const ReachingDefinitions& rd) {
-    std::unordered_map<Ref, val_t, ref_hash> var_to_val;
-    std::unordered_set<Ref, ref_hash> not_inductive;
+  void FindInductiveVars(Fn* fn, ReachingDefinitions& rd) {
+    hash_map<Ref, val_t, ref_hash> inductives;
+    hash_set<Ref, ref_hash> not_inductive;
 
-    const auto& base_inductive_vars = FindBaseInductiveVars();
+    const auto& base_inductive_vars = FindBaseInductiveVars(rd);
     for (const auto& var : base_inductive_vars) {
-      var_to_val[var] = {var, "1", "0"};
+      inductives[var] = {var, "1", "0"};
     }
 
-    size_t last_var_to_val_size;
+    auto definitions_count = CountDefinitions();
+
+    size_t last_inductives_size;
     do {
-      last_var_to_val_size = var_to_val.size();
+      last_inductives_size = inductives.size();
+      
       ForEachInstruction(
-        [this, fn, &var_to_val](const Blk&, const Ins& ins) {
-          if (ismath(ins.op)) {
-            if (var_to_val.find(ins.to) == var_to_val.cend() &&
-                this->IsDerivedIndactiveIns(var_to_val, ins) &&
-                this->CountDefinitions(ins.to) == 1) {
-              // TODO: check also no other definitions between
-              // (last frames in 6.4.3)
-              this->AddVal(fn, var_to_val, ins);
+        [this, fn, &rd, &definitions_count, &base_inductive_vars, &inductives, &not_inductive](
+            const Blk& blk, const Ins& ins) {
+          // don't check for already inductives;
+          if (inductives.contains(ins.to) || not_inductive.contains(ins.to)) {
+            return;
+          }
+
+          // should be only one definition and mul or add
+          if (!(ins.op == Oadd || ins.op == Omul) || 
+              definitions_count[ins.to] != 1) {
+            not_inductive.insert(ins.to);
+            return;
+          }
+
+          // find invariant operand and potentially inductive
+          Ref inv = ins.arg[0], ind = ins.arg[1];
+          if (!IsInvariantArg(rd, blk, ins, inv)) {
+            std::swap(inv, ind);
+          }
+          if (!IsInvariantArg(rd, blk, ins, inv)) {
+            not_inductive.insert(ins.to);
+            return;
+          }
+          
+          if (!inductives.contains(ind)) {
+            return;
+          }
+
+          // try to find reaching definition in this block
+          for (const Ins* i = &ins - 1; i != blk.ins - 1; --i) {
+            if (i->to == ind) {
+              inductives.emplace(ins.to, CreateVal(fn, inductives[ind], ins.op, inv));
+              return;
             }
           }
+          
+          const auto& reaching_blocks = rd.in[&blk][ind];
+          int in_loop = std::count_if(reaching_blocks.cbegin(), reaching_blocks.cend(), [this](const Blk* blk) {
+            return this->blocks.contains(blk);
+          });
+          if (in_loop != 1) {
+            not_inductive.insert(ins.to);
+            return;
+          }
+          inductives.emplace(ins.to, CreateVal(fn, inductives[ind], ins.op, inv));
         }
       );
-    } while (var_to_val.size() != last_var_to_val_size);
+    } while (inductives.size() != last_inductives_size);
 
-    this->inductive_families = GetFamilies(var_to_val);
+    this->inductive_families = GetFamilies(inductives);
   }
 };
 
+bool operator==(const val_t& lhs, const val_t& rhs) {
+  return std::get<0>(lhs) == std::get<0>(rhs) &&
+         std::get<1>(lhs) == std::get<1>(rhs) &&
+         std::get<2>(lhs) == std::get<2>(rhs);
+}
 
 Edges FindBackEdges(Blk *start) {
   Edges back_edges;
@@ -341,9 +415,9 @@ Edges FindBackEdges(Blk *start) {
   return back_edges;
 }
 
-void ExtendWithLoopBlocks(std::unordered_set<const Blk*>& blocks, 
+void ExtendWithLoopBlocks(hash_set<const Blk*>& blocks, 
                           const Blk* cur_block) {
-  if (blocks.find(cur_block) != blocks.cend()) {
+  if (blocks.contains(cur_block)) {
     return;
   }
 
@@ -355,7 +429,8 @@ void ExtendWithLoopBlocks(std::unordered_set<const Blk*>& blocks,
 
 Loop FindLoop(const Edge& back_edge) {
   const auto& [start_block, loop_head] = back_edge;
-  std::unordered_set<const Blk*> loop_blocks = {loop_head};
+  hash_set<const Blk*> loop_blocks;
+  loop_blocks.insert(loop_head);
 
   ExtendWithLoopBlocks(loop_blocks, start_block);
   return {loop_head, std::move(loop_blocks)};
@@ -401,9 +476,9 @@ static void readfn(Fn *fn) {
     for (const auto& block : loop.blocks) {
       std::cout << block->name << " ";
     }
-    std::cout << "| invariant variables: ";
-    for (const auto& inv : loop.invariant_vars) {
-      std::cout << fn->tmp[inv.val].name << " ";
+    std::cout << "| invariant instructions: ";
+    for (const auto& inv : loop.invariant_statements) {
+      std::cout << fn->tmp[inv->to.val].name << " ";
     }
     std::cout << std::endl;
     for (const auto& [ind, family] : loop.inductive_families) {
