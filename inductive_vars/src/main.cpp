@@ -254,8 +254,14 @@ struct Loop {
         for (const Ins* ins = blk->ins; ins != blk->ins + blk->nins; ++ins) {
           if (ins->to.type != RTmp || definitions.at(ins->to) != 1) continue;
   
-          for (const Ref* ref = ins->arg; ref < ins->arg + 1 + !iscopy(ins->op); ++ref) {
-            if (!IsInvariantArg(rd, *blk, *ins, *ref)) continue;
+          bool invatiant_args = std::all_of(
+            ins->arg, ins->arg + 1 + !iscopy(ins->op),
+            [this, &rd, &blk, &ins](Ref ref) {
+              return IsInvariantArg(rd, *blk, *ins, ref);
+            }
+          );
+          if (!invatiant_args) {
+            continue;
           }
           invariant_statements.insert(ins);
         }
