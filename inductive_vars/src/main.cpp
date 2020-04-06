@@ -474,7 +474,6 @@ static void readfn(Fn *fn) {
   rd.FindReachingDefinitions(fn);
 
   auto loops = FindLoops(fn->start);
-
   for (auto& loop : loops) {
     loop.FindInvariants(fn, rd);
     loop.FindInductiveVars(fn, rd);
@@ -482,13 +481,9 @@ static void readfn(Fn *fn) {
     for (const auto& block : loop.blocks) {
       std::cout << block->name << " ";
     }
-    std::cout << "| invariant instructions: ";
-    for (const auto& inv : loop.invariant_statements) {
-      std::cout << fn->tmp[inv->to.val].name << " ";
-    }
     std::cout << std::endl;
-    for (const auto& [ind, family] : loop.inductive_families) {
-      std::cout << to_string(fn, ind) << ":" << std::endl;
+    for (const auto& [ind_var, family] : loop.inductive_families) {
+      std::cout << to_string(fn, ind_var) << ":" << std::endl;
       for (const auto& [name, val] : family) {
         const auto& [i, a, b] = val;
         std::cout << "\t" << to_string(fn, name) << " = " 
