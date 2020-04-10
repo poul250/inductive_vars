@@ -1,0 +1,7 @@
+2
+loop2body loop1body L1 loop2 L2 L3 loop1 
+1
+i	n=<i,1,(0)+a>	i=<i,1,0>	
+L1 loop2body loop2 
+1
+j	divisor=<j,1,(0)+2>	j=<j,1,0>	

@@ -385,9 +385,12 @@ struct Loop {
           }
           
           const auto& reaching_blocks = rd.in[&blk][ind];
-          int in_loop = std::count_if(reaching_blocks.cbegin(), reaching_blocks.cend(), [this](const Blk* blk) {
-            return this->blocks.contains(blk);
-          });
+          int in_loop = std::count_if(
+            reaching_blocks.cbegin(), reaching_blocks.cend(), 
+            [this](const Blk* blk) {
+              return this->blocks.contains(blk);
+            }
+          );
           if (in_loop != 1) {
             not_inductive.insert(ins.to);
             return;
@@ -468,28 +471,28 @@ void LifehokkuDlyaSamuraev(Fn* fn) {
 
 static void readfn(Fn *fn) {
   LifehokkuDlyaSamuraev(fn);
-  printfn(fn, stdout);
 
   ReachingDefinitions rd;
   rd.FindReachingDefinitions(fn);
 
   auto loops = FindLoops(fn->start);
+  std::cout << loops.size() << std::endl;
   for (auto& loop : loops) {
     loop.FindInvariants(fn, rd);
     loop.FindInductiveVars(fn, rd);
-    std::cout << "blocks: ";
     for (const auto& block : loop.blocks) {
       std::cout << block->name << " ";
     }
     std::cout << std::endl;
+    std::cout << loop.inductive_families.size() << std::endl;
     for (const auto& [ind_var, family] : loop.inductive_families) {
-      std::cout << to_string(fn, ind_var) << ":" << std::endl;
+      std::cout << to_string(fn, ind_var) << "\t";
       for (const auto& [name, val] : family) {
         const auto& [i, a, b] = val;
-        std::cout << "\t" << to_string(fn, name) << " = " 
-                  << "<" << to_string(fn, i) << ", " << a << ", " << b << ">" 
-                  << std::endl;
+        std::cout << to_string(fn, name) << "=" 
+                  << "<" << to_string(fn, i) << "," << a << "," << b << ">\t";
       }
+      std::cout << std::endl;
     }
   }
 }
